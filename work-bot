@@ -1,0 +1,285 @@
+import discord
+from discord.ext import commands, tasks
+from discord.utils import get
+import asyncio
+
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix='-', intents=intents)
+
+TEMP_CATEGORY_NAME = "personal-spaces"
+HIDDEN_CATEGORY_NAME = "Hidden_spaces"
+TEMP_CHANNEL_NAME = "➕ Join to Create"
+TEMP_COMMAND_CHANNEL = "temp-vc"
+temp_channels = {}  # user_id: voice_channel
+channel_settings = {
+}  # channel_id: {"name": ..., "limit": ..., "allowed": set()}
+
+PICTURES_CHANNEL_ID = 1365309871163052212
+EMOJI_NAMES = ['blackheart', 'bunnyheart', 'Goth']
+
+
+@bot.event
+async def on_ready():
+    print(f"Bot is ready. Logged in as {bot.user}")
+    cleanup_empty_channels.start()
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    print(f"Voice state update: {member} - {before} -> {after}"
+          )  # Debugging line
+
+    if after.channel and after.channel.name == TEMP_CHANNEL_NAME:
+        guild = member.guild
+        category = get(guild.categories, name=TEMP_CATEGORY_NAME)
+        if not category:
+            category = await guild.create_category(TEMP_CATEGORY_NAME)
+
+        # Check if user already has a temp VC
+        if member.id in temp_channels:
+            channel = temp_channels[member.id]
+            if channel and channel in guild.voice_channels:
+                await member.move_to(channel)
+                return
+
+        # Create VC
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(connect=False),
+            member: discord.PermissionOverwrite(connect=True,
+                                                manage_channels=True)
+        }
+        channel = await guild.create_voice_channel(name=f"{member.name}'s VC",
+                                                   overwrites=overwrites,
+                                                   category=category)
+        print(f"Created VC: {channel.name}")  # Debugging line
+        await member.move_to(channel)
+        temp_channels[member.id] = channel
+        channel_settings[channel.id] = {
+            "name": f"{member.name}'s VC",
+            "limit": None,
+            "allowed": {member.id}
+        }
+
+        # Send help embed in the VC's linked text chat
+        try:
+            text_channel = channel.guild.get_channel(channel.id)
+            if text_channel:
+                embed = discord.Embed(
+                    title="👋 Welcome to your Personal Voice!",
+                    description=(
+                        "Here's what you can do:\n"
+                        "- `-name <new name>` → Change your VC name\n"
+                        "- `-limit <number>` → Limit number of users\n"
+                        "- `-kick @user` → Kick someone from VC\n"
+                        "- `-lock` / `-unlock` → Lock or unlock VC\n"
+                        "- `-add @user` → Let someone join when locked\n"
+                        "- `-Hide` → Hide voice channel from others\n\n"
+                        "You can use these commands while you're in your VC."),
+                    color=discord.Color.blue())
+                await text_channel.send(
+                    content=f"{member.mention} welcome to your personal space!",
+                    embed=embed)
+        except Exception as e:
+            print(f"Failed to send help embed in VC chat: {e}")
+
+
+@tasks.loop(seconds=60)
+async def cleanup_empty_channels():
+    for user_id, channel in list(temp_channels.items()):
+        if channel and len(channel.members) == 0:
+            await asyncio.sleep(10)
+            if len(channel.members) == 0:  # Check again after 10 seconds
+                try:
+                    await channel.delete()
+                    temp_channels.pop(user_id, None)
+                    channel_settings.pop(channel.id, None)
+                except discord.NotFound:
+                    continue
+
+
+async def is_valid_context(ctx):
+    if ctx.channel.name == TEMP_COMMAND_CHANNEL:
+        return True
+    if isinstance(ctx.channel, discord.VoiceChannel):
+        return True
+    if ctx.author.voice and ctx.author.voice.channel == temp_channels.get(
+            ctx.author.id):
+        return True
+    return False
+
+
+def get_user_channel(user):
+    return temp_channels.get(user.id)
+
+
+@bot.command()
+async def name(ctx, *, new_name):
+    if not await is_valid_context(ctx):
+        msg = await ctx.send("You are not in a personal VC.")
+        await asyncio.sleep(4)
+        await msg.delete()
+        return  # Early return if context is not valid
+
+    channel = get_user_channel(ctx.author)
+    if channel:
+        await channel.edit(name=new_name)
+        channel_settings[channel.id]["name"] = new_name
+        msg = await ctx.send(f"VC name changed to: {new_name}")
+        await asyncio.sleep(4)
+        await msg.delete()
+    else:
+        msg = await ctx.send("You are not in a personal VC.")
+        await asyncio.sleep(4)
+        await msg.delete()
+
+
+@bot.command()
+async def limit(ctx, num: int):
+    if not await is_valid_context(ctx):
+        return
+    channel = get_user_channel(ctx.author)
+    if channel:
+        await channel.edit(user_limit=num)
+        channel_settings[channel.id]["limit"] = num
+        msg = await ctx.send(f"VC limit set to: {num}")
+        await asyncio.sleep(4)
+        await msg.delete()
+
+
+@bot.command()
+async def kick(ctx, member: discord.Member):
+    if not await is_valid_context(ctx):
+        return
+    channel = get_user_channel(ctx.author)
+    if channel and member in channel.members:
+        await member.move_to(None)
+        msg = await ctx.send(f"{member} kicked from the VC")
+        await asyncio.sleep(4)
+        await msg.delete()
+
+
+@bot.command()
+async def lock(ctx):
+    if not await is_valid_context(ctx):
+        return
+
+    channel = get_user_channel(ctx.author)
+    if channel:
+        overwrite = channel.overwrites_for(ctx.guild.default_role)
+        overwrite.connect = False  # Lock the channel
+        await channel.set_permissions(ctx.guild.default_role,
+                                      overwrite=overwrite)
+        msg = await ctx.send("VC is now locked.")
+        await asyncio.sleep(4)
+        await msg.delete()
+
+
+@bot.command()
+async def unlock(ctx):
+    if not await is_valid_context(ctx):
+        return
+
+    channel = get_user_channel(ctx.author)
+    if channel:
+        overwrite = channel.overwrites_for(ctx.guild.default_role)
+        overwrite.connect = True  # Unlock the channel
+        await channel.set_permissions(ctx.guild.default_role,
+                                      overwrite=overwrite)
+        msg = await ctx.send("VC is now unlocked.")
+        await asyncio.sleep(4)
+        await msg.delete()
+
+
+@bot.command()
+async def add(ctx, member: discord.Member):
+    if not await is_valid_context(ctx):
+        return
+    channel = get_user_channel(ctx.author)
+    if channel:
+        settings = channel_settings[channel.id]
+        if member.id in settings["allowed"]:
+            msg = await ctx.send(f"{member} already has permission to join.")
+            await asyncio.sleep(4)
+            await msg.delete()
+        else:
+            settings["allowed"].add(member.id)
+            await channel.set_permissions(member, connect=True)
+            msg = await ctx.send(f"{member} has been added to the VC.")
+            await asyncio.sleep(4)
+            await msg.delete()
+
+
+@bot.command()
+async def hide(ctx):
+    if not await is_valid_context(ctx):
+        return
+    channel = get_user_channel(ctx.author)
+    if not channel:
+        return
+
+    settings = channel_settings.get(channel.id)
+    if not settings:
+        return
+
+    print(f"Hiding VC {channel.name} for users not allowed to join."
+          )  # Debugging line
+
+    # Check if the VC is locked
+    overwrite = channel.overwrites_for(ctx.guild.default_role)
+    if overwrite.connect is not False:
+        await ctx.send("🔒 You must lock the channel before hiding it.")
+        return
+
+    # Hide the VC from members in the same category but not in the allowed list
+    for member in ctx.guild.members:
+        if member.bot:
+            continue
+        if member.id not in settings["allowed"]:
+            await channel.set_permissions(member, view_channel=False)
+
+    msg = await ctx.send(f"{ctx.author.mention}, your VC is now hidden.")
+    await asyncio.sleep(4)
+    await msg.delete()
+
+
+@bot.command()
+async def unhide(ctx):
+    if not await is_valid_context(ctx):
+        return
+    channel = get_user_channel(ctx.author)
+    if channel:
+        settings = channel_settings[channel.id]
+        for member in ctx.guild.members:
+            if member.bot:
+                continue
+            if member.id not in settings["allowed"]:
+                await channel.set_permissions(member, view_channel=True)
+        msg = await ctx.send(f"{ctx.author.mention}, your VC is now visible.")
+        await asyncio.sleep(4)
+        await msg.delete()
+
+
+@bot.event
+@bot.event
+async def on_message(message):
+    if message.channel.id != PICTURES_CHANNEL_ID:
+        return
+    if message.author.bot:
+        return
+
+    # Check if the message has an image attachment or embedded image
+    has_image = any((a.content_type and a.content_type.startswith('image/'))
+                    for a in message.attachments) or any(
+                        e.image.url for e in message.embeds if e.image)
+
+    if has_image:
+        for name in EMOJI_NAMES:
+            emoji = get(message.guild.emojis, name=name)
+            if emoji:
+                await message.add_reaction(emoji)
+
+    # Ensure the bot processes commands after custom on_message handling
+    await bot.process_commands(message)
+
+
+bot.run("")
