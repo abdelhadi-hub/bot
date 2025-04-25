@@ -1,285 +1,369 @@
 import discord
-from discord.ext import commands, tasks
-from discord.utils import get
 import asyncio
+from discord.ext import commands
+from discord import app_commands
+from discord.utils import get
+import json
+import random
+import datetime
+import re
+
+# Load token from config
+with open("config.json", "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+# Constants — keep these in your main file
+GUILD_ID = 1362772675076034606
+LOG_CHANNEL_ID = 1362812797204959282
+WELCOME_CHANNEL_ID = 1362772843938451547
+DEFAULT_ROLE_NAME = "member"
+STAFF_ROLE_NAME = "staff team"
+
+# Setup intents
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True  # 🧠 Required for on_member_join
+
 
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix='-', intents=intents)
-
-TEMP_CATEGORY_NAME = "personal-spaces"
-HIDDEN_CATEGORY_NAME = "Hidden_spaces"
-TEMP_CHANNEL_NAME = "➕ Join to Create"
-TEMP_COMMAND_CHANNEL = "temp-vc"
-temp_channels = {}  # user_id: voice_channel
-channel_settings = {
-}  # channel_id: {"name": ..., "limit": ..., "allowed": set()}
+bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
+identities = {}
 
 PICTURES_CHANNEL_ID = 1365309871163052212
-EMOJI_NAMES = ['blackheart', 'bunnyheart', 'Goth']
+
+# Mapping user IDs to their specific emoji(s)
+USER_EMOJIS = {
+    1052702490031820920: ["abdou", "me"],  # Abdou
+    593014763790008330: ["aww", "Asta", "emoji_8", "kirby_hooray"],  # yuno
+    1363241660007321680: ["WhiteCrown"],  # work_bot
+    1362538309263425556: ["WhiteCrown"],  # abdou_bot
+}
 
 
 @bot.event
 async def on_ready():
     print(f"Bot is ready. Logged in as {bot.user}")
-    cleanup_empty_channels.start()
 
 
-@bot.event
-async def on_voice_state_update(member, before, after):
-    print(f"Voice state update: {member} - {before} -> {after}"
-          )  # Debugging line
-
-    if after.channel and after.channel.name == TEMP_CHANNEL_NAME:
-        guild = member.guild
-        category = get(guild.categories, name=TEMP_CATEGORY_NAME)
-        if not category:
-            category = await guild.create_category(TEMP_CATEGORY_NAME)
-
-        # Check if user already has a temp VC
-        if member.id in temp_channels:
-            channel = temp_channels[member.id]
-            if channel and channel in guild.voice_channels:
-                await member.move_to(channel)
-                return
-
-        # Create VC
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(connect=False),
-            member: discord.PermissionOverwrite(connect=True,
-                                                manage_channels=True)
-        }
-        channel = await guild.create_voice_channel(name=f"{member.name}'s VC",
-                                                   overwrites=overwrites,
-                                                   category=category)
-        print(f"Created VC: {channel.name}")  # Debugging line
-        await member.move_to(channel)
-        temp_channels[member.id] = channel
-        channel_settings[channel.id] = {
-            "name": f"{member.name}'s VC",
-            "limit": None,
-            "allowed": {member.id}
-        }
-
-        # Send help embed in the VC's linked text chat
-        try:
-            text_channel = channel.guild.get_channel(channel.id)
-            if text_channel:
-                embed = discord.Embed(
-                    title="👋 Welcome to your Personal Voice!",
-                    description=(
-                        "Here's what you can do:\n"
-                        "- `-name <new name>` → Change your VC name\n"
-                        "- `-limit <number>` → Limit number of users\n"
-                        "- `-kick @user` → Kick someone from VC\n"
-                        "- `-lock` / `-unlock` → Lock or unlock VC\n"
-                        "- `-add @user` → Let someone join when locked\n"
-                        "- `-Hide` → Hide voice channel from others\n\n"
-                        "You can use these commands while you're in your VC."),
-                    color=discord.Color.blue())
-                await text_channel.send(
-                    content=f"{member.mention} welcome to your personal space!",
-                    embed=embed)
-        except Exception as e:
-            print(f"Failed to send help embed in VC chat: {e}")
-
-
-@tasks.loop(seconds=60)
-async def cleanup_empty_channels():
-    for user_id, channel in list(temp_channels.items()):
-        if channel and len(channel.members) == 0:
-            await asyncio.sleep(10)
-            if len(channel.members) == 0:  # Check again after 10 seconds
-                try:
-                    await channel.delete()
-                    temp_channels.pop(user_id, None)
-                    channel_settings.pop(channel.id, None)
-                except discord.NotFound:
-                    continue
-
-
-async def is_valid_context(ctx):
-    if ctx.channel.name == TEMP_COMMAND_CHANNEL:
-        return True
-    if isinstance(ctx.channel, discord.VoiceChannel):
-        return True
-    if ctx.author.voice and ctx.author.voice.channel == temp_channels.get(
-            ctx.author.id):
-        return True
-    return False
-
-
-def get_user_channel(user):
-    return temp_channels.get(user.id)
-
-
-@bot.command()
-async def name(ctx, *, new_name):
-    if not await is_valid_context(ctx):
-        msg = await ctx.send("You are not in a personal VC.")
-        await asyncio.sleep(4)
-        await msg.delete()
-        return  # Early return if context is not valid
-
-    channel = get_user_channel(ctx.author)
-    if channel:
-        await channel.edit(name=new_name)
-        channel_settings[channel.id]["name"] = new_name
-        msg = await ctx.send(f"VC name changed to: {new_name}")
-        await asyncio.sleep(4)
-        await msg.delete()
-    else:
-        msg = await ctx.send("You are not in a personal VC.")
-        await asyncio.sleep(4)
-        await msg.delete()
-
-
-@bot.command()
-async def limit(ctx, num: int):
-    if not await is_valid_context(ctx):
-        return
-    channel = get_user_channel(ctx.author)
-    if channel:
-        await channel.edit(user_limit=num)
-        channel_settings[channel.id]["limit"] = num
-        msg = await ctx.send(f"VC limit set to: {num}")
-        await asyncio.sleep(4)
-        await msg.delete()
-
-
-@bot.command()
-async def kick(ctx, member: discord.Member):
-    if not await is_valid_context(ctx):
-        return
-    channel = get_user_channel(ctx.author)
-    if channel and member in channel.members:
-        await member.move_to(None)
-        msg = await ctx.send(f"{member} kicked from the VC")
-        await asyncio.sleep(4)
-        await msg.delete()
-
-
-@bot.command()
-async def lock(ctx):
-    if not await is_valid_context(ctx):
-        return
-
-    channel = get_user_channel(ctx.author)
-    if channel:
-        overwrite = channel.overwrites_for(ctx.guild.default_role)
-        overwrite.connect = False  # Lock the channel
-        await channel.set_permissions(ctx.guild.default_role,
-                                      overwrite=overwrite)
-        msg = await ctx.send("VC is now locked.")
-        await asyncio.sleep(4)
-        await msg.delete()
-
-
-@bot.command()
-async def unlock(ctx):
-    if not await is_valid_context(ctx):
-        return
-
-    channel = get_user_channel(ctx.author)
-    if channel:
-        overwrite = channel.overwrites_for(ctx.guild.default_role)
-        overwrite.connect = True  # Unlock the channel
-        await channel.set_permissions(ctx.guild.default_role,
-                                      overwrite=overwrite)
-        msg = await ctx.send("VC is now unlocked.")
-        await asyncio.sleep(4)
-        await msg.delete()
-
-
-@bot.command()
-async def add(ctx, member: discord.Member):
-    if not await is_valid_context(ctx):
-        return
-    channel = get_user_channel(ctx.author)
-    if channel:
-        settings = channel_settings[channel.id]
-        if member.id in settings["allowed"]:
-            msg = await ctx.send(f"{member} already has permission to join.")
-            await asyncio.sleep(4)
-            await msg.delete()
-        else:
-            settings["allowed"].add(member.id)
-            await channel.set_permissions(member, connect=True)
-            msg = await ctx.send(f"{member} has been added to the VC.")
-            await asyncio.sleep(4)
-            await msg.delete()
-
-
-@bot.command()
-async def hide(ctx):
-    if not await is_valid_context(ctx):
-        return
-    channel = get_user_channel(ctx.author)
-    if not channel:
-        return
-
-    settings = channel_settings.get(channel.id)
-    if not settings:
-        return
-
-    print(f"Hiding VC {channel.name} for users not allowed to join."
-          )  # Debugging line
-
-    # Check if the VC is locked
-    overwrite = channel.overwrites_for(ctx.guild.default_role)
-    if overwrite.connect is not False:
-        await ctx.send("🔒 You must lock the channel before hiding it.")
-        return
-
-    # Hide the VC from members in the same category but not in the allowed list
-    for member in ctx.guild.members:
-        if member.bot:
-            continue
-        if member.id not in settings["allowed"]:
-            await channel.set_permissions(member, view_channel=False)
-
-    msg = await ctx.send(f"{ctx.author.mention}, your VC is now hidden.")
-    await asyncio.sleep(4)
-    await msg.delete()
-
-
-@bot.command()
-async def unhide(ctx):
-    if not await is_valid_context(ctx):
-        return
-    channel = get_user_channel(ctx.author)
-    if channel:
-        settings = channel_settings[channel.id]
-        for member in ctx.guild.members:
-            if member.bot:
-                continue
-            if member.id not in settings["allowed"]:
-                await channel.set_permissions(member, view_channel=True)
-        msg = await ctx.send(f"{ctx.author.mention}, your VC is now visible.")
-        await asyncio.sleep(4)
-        await msg.delete()
-
-
-@bot.event
 @bot.event
 async def on_message(message):
-    if message.channel.id != PICTURES_CHANNEL_ID:
-        return
     if message.author.bot:
         return
 
-    # Check if the message has an image attachment or embedded image
-    has_image = any((a.content_type and a.content_type.startswith('image/'))
-                    for a in message.attachments) or any(
-                        e.image.url for e in message.embeds if e.image)
+    # Handle image auto-reactions
+    if message.channel.id == PICTURES_CHANNEL_ID:
+        has_image = any(
+            (a.content_type and a.content_type.startswith('image/'))
+            for a in message.attachments) or any(
+                e.image.url for e in message.embeds if e.image)
 
-    if has_image:
-        for name in EMOJI_NAMES:
-            emoji = get(message.guild.emojis, name=name)
-            if emoji:
-                await message.add_reaction(emoji)
+        if has_image:
+            for name in ['blackheart', 'bunnyheart',
+                         'Goth']:  # Use a list of emojis to react
+                emoji = get(message.guild.emojis, name=name)
+                if emoji:
+                    await message.add_reaction(emoji)
 
-    # Ensure the bot processes commands after custom on_message handling
+    # Handle auto-reactions for being tagged and replied to
+    for user_id, emoji_names in USER_EMOJIS.items():
+        if any(user_id == mention.id for mention in message.mentions):
+            # If the user is mentioned, react with the emojis associated with them
+            for emoji_name in emoji_names:
+                emoji = get(message.guild.emojis, name=emoji_name)
+                if emoji:
+                    await message.add_reaction(emoji)
+
+        # If the message is a reply to one of the bot's messages
+        if message.reference and message.reference.message_id != message.id:
+            # If the message is a reply to the bot's message, add a reaction
+            replied_message = await message.channel.fetch_message(
+                message.reference.message_id)
+            if replied_message.author.id == bot.user.id:
+                for emoji_name in emoji_names:
+                    emoji = get(message.guild.emojis, name=emoji_name)
+                    if emoji:
+                        await message.add_reaction(emoji)
+
     await bot.process_commands(message)
 
 
-bot.run("")
+
+
+def rgb(r, g, b):
+    return discord.Color.from_rgb(r, g, b)
+
+
+# Helper function to log actions
+def log_action(action_type, user_id, reason, duration=None):
+    # This can be a simple log to a file or a database; this example just prints it.
+    print(
+        f"{action_type.capitalize()} action: User ID {user_id}, Reason: {reason}, Duration: {duration}"
+    )
+
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    print("🔁 Synced slash commands")
+
+
+@bot.event
+async def on_member_join(member):
+    print(f"📥 Member joined: {member.name}")
+    channel = bot.get_channel(WELCOME_CHANNEL_ID)
+
+    embed = discord.Embed(
+        title="Welcome to Abdou server!",
+        description=f"Welcome **{member.mention}** to Abdou server.",
+        color=rgb(137, 207, 240),
+        timestamp=datetime.datetime.now())
+
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    role = discord.utils.get(member.guild.roles, name=DEFAULT_ROLE_NAME)
+    if role:
+        await member.add_roles(role)
+    else:
+        print("⚠️ Role not found")
+
+    if channel:
+        await channel.send(embed=embed)
+    else:
+        print("❌ Welcome channel not found")
+
+
+# Slash command: create identity
+@tree.command(name="create_identity",
+              description="Create a fake identity",
+              guild=discord.Object(id=GUILD_ID))
+async def create_identity(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if user_id in identities:
+        await interaction.response.send_message(
+            "You already have a fake identity!", ephemeral=True)
+        return
+    fake_name = f"unknown-{random.randint(1000, 9999)}"
+    identities[user_id] = fake_name
+    await interaction.response.send_message("Fake identity created",
+                                            ephemeral=True)
+
+
+# Slash command: send fake message
+@tree.command(name="send_fake_message",
+              description="Send a message using your fake identity",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(message="The message to send")
+async def send_fake_message(interaction: discord.Interaction, message: str):
+    user_id = str(interaction.user.id)
+    if user_id not in identities:
+        await interaction.response.send_message(
+            "Create your identity first using `/create_identity`.",
+            ephemeral=True)
+        return
+    await interaction.channel.send(f"{message}")
+    await interaction.response.send_message(
+        "Your anonymous message has been sent.", ephemeral=True)
+
+
+# Slash command: delete identity
+@tree.command(name="delete_identity",
+              description="Delete your fake identity",
+              guild=discord.Object(id=GUILD_ID))
+async def delete_identity(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if user_id not in identities:
+        await interaction.response.send_message(
+            "You don’t have a fake identity to delete!", ephemeral=True)
+        return
+    del identities[user_id]
+    await interaction.response.send_message("Fake identity deleted.",
+                                            ephemeral=True)
+
+
+# Kick user
+@tree.command(name="kick",
+              description="Kick a user from the server",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a user to kick from the server")
+async def kick(interaction: discord.Interaction,
+               user: discord.Member,
+               *,
+               reason: str = None):
+    if interaction.guild and (interaction.user == interaction.guild.owner
+                              or any(role.name in ['Admin', 'staff team']
+                                     for role in interaction.user.roles)):
+        await interaction.guild.kick(user, reason=reason)
+        await interaction.response.send_message(
+            f'{user.mention} has been kicked from the server.', ephemeral=True)
+
+        # Log the kick action (awaiting the log_action coroutine)
+        await log_action(interaction, "kick", user.id, reason)
+    else:
+        await interaction.response.send_message(
+            'You do not have the necessary permissions for this command.',
+            ephemeral=True)
+
+
+# Ban user
+@tree.command(name="ban",
+              description="Ban a user from the server",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a user to ban from the server")
+async def ban(interaction: discord.Interaction,
+              user: discord.Member,
+              *,
+              reason: str = None):
+    if interaction.guild and (interaction.user == interaction.guild.owner
+                              or any(role.name in ['Admin', 'staff team']
+                                     for role in interaction.user.roles)):
+        await interaction.guild.ban(user, reason=reason)
+        await interaction.response.send_message(
+            f'{user.mention} has been banned from the server.', ephemeral=True)
+
+        # Log the ban action (awaiting the log_action coroutine)
+        await log_action(interaction, "ban", user.id, reason)
+    else:
+        await interaction.response.send_message(
+            'You do not have the necessary permissions for this command.',
+            ephemeral=True)
+
+
+# Timeout user
+@tree.command(name="timeout",
+              description="Timeout a user temporarily",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    user="Select a user to timeout",
+    duration="Duration of the timeout (e.g., 5s, 2m, 1h, 3d, 1w)",
+    reason="Reason for the timeout")
+async def timeout(interaction: discord.Interaction,
+                  user: discord.Member,
+                  duration: str,
+                  reason: str = None):
+    if interaction.guild and (interaction.user == interaction.guild.owner
+                              or any(role.name in ['Admin', 'staff team']
+                                     for role in interaction.user.roles)):
+        # Parse the duration input
+        regex = r"(\d+)([smhdw])"
+        match = re.match(regex, duration.lower())
+
+        if not match:
+            await interaction.response.send_message(
+                "Invalid duration format. Please use a valid format like `5s`, `2m`, `1h`, `3d`, `1w`.",
+                ephemeral=True)
+            return
+
+        num = int(match.group(1))
+        unit = match.group(2)
+
+        if unit == 's':
+            timeout_until = discord.utils.utcnow() + datetime.timedelta(
+                seconds=num)
+        elif unit == 'm':
+            timeout_until = discord.utils.utcnow() + datetime.timedelta(
+                minutes=num)
+        elif unit == 'h':
+            timeout_until = discord.utils.utcnow() + datetime.timedelta(
+                hours=num)
+        elif unit == 'd':
+            timeout_until = discord.utils.utcnow() + datetime.timedelta(
+                days=num)
+        elif unit == 'w':
+            timeout_until = discord.utils.utcnow() + datetime.timedelta(
+                weeks=num)
+
+        # Apply the timeout
+        try:
+            await user.timeout(timeout_until,
+                               reason=reason or f"Timed out for {duration}")
+            await interaction.response.send_message(
+                f'{user.mention} has been timed out for {duration}. Reason: {reason or "No reason provided"}',
+                ephemeral=True)
+
+            # Log the timeout action (awaiting the log_action coroutine)
+            await log_action(interaction, "timeout", user.id, reason, duration)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                'I do not have the necessary permissions to timeout this user.',
+                ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            'You do not have the necessary permissions for this command.',
+            ephemeral=True)
+
+
+# Untimeout user
+@tree.command(name="untimeout",
+              description="Remove timeout from a user",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a user to untimeout")
+async def untimeout(interaction: discord.Interaction, user: discord.Member):
+    if interaction.guild and (interaction.user == interaction.guild.owner
+                              or any(role.name in ['Admin', 'staff team']
+                                     for role in interaction.user.roles)):
+        # Remove timeout from the user
+        try:
+            await user.timeout(None)  # None removes the timeout
+            await interaction.response.send_message(
+                f'{user.mention} has been removed from timeout.',
+                ephemeral=True)
+
+            # Log the untimeout action (awaiting the log_action coroutine)
+            await log_action(interaction, "untimeout", user.id,
+                             "No reason provided")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                'I do not have the necessary permissions to untimeout this user.',
+                ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            'You do not have the necessary permissions for this command.',
+            ephemeral=True)
+
+
+async def log_action(interaction,
+                     action_type,
+                     user_id,
+                     reason,
+                     duration=None,
+                     performer=None):
+    """Log actions taken by staff members with details in an embed."""
+
+    log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
+
+    user = await interaction.guild.fetch_member(user_id)
+
+    # Prepare embed
+    embed = discord.Embed(
+        title=f"{action_type.capitalize()} Action",
+        description=f"Action Type: {action_type.capitalize()}\n"
+                    f"User: {user.mention} (ID: {user_id})\n"
+                    f"Reason: {reason or 'No reason provided'}\n"
+                    f"Duration: {duration or 'N/A'}\n"
+                    f"Performed by: {interaction.user.mention}", 
+        color=discord.Color.blue()
+    )
+
+    # Add footer with the current time
+    footer_text = f"Action performed at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    embed.set_footer(text=footer_text)
+
+    # Set thumbnail (profile picture)
+    if user.avatar:
+        embed.set_thumbnail(url=user.avatar.url)
+    else:
+        embed.set_thumbnail(url="https://cdn.discordapp.com/embed/avatars/0.png")
+
+    # Send the embed to the log channel
+    if log_channel:
+        await log_channel.send(embed=embed)
+    else:
+        print(f"Error: Log channel with ID {LOG_CHANNEL_ID} not found or inaccessible!")
+
+
+
+# Run bot
+bot.run(config["token"])
